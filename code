@@ -1,0 +1,172 @@
+## 0.) Setting my working directory
+setwd("~/Desktop/CAPSTONE/RStudio files")
+
+## 1.) Downloading the relevant libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("TCGAbiolinks")
+install.packages("ggplot2")
+install.packages("tidyverse")
+install.packages("devtools")
+library(devtools); install_github("im3sanger/dndscv")
+
+## 2.) Opening the relevant libraries
+library(TCGAbiolinks)
+library(dndscv)
+library(dplyr)
+library(stringr)
+library(data.table)
+library(tidyr)
+library(tidyselect)
+library(ggplot2)
+library(tidyverse)
+
+## 2.) Inspecting TCGA data
+TCGAprojects <- TCGAbiolinks::getGDCprojects()$project_id # list of projects ids of projects included in the TCGA library
+TCGAprojects <- grep("^TCGA", TCGAprojects, value=TRUE) # only those (33) that start with TCGA
+typeof(TCGAprojects) # tells me that they are characters
+TCGAprojects <- as.list(TCGAprojects) # converts them into a list
+TCGAprojects <- unlist(TCGAprojects) # back to a vector
+TCGAprojects <- str_sort(TCGAprojects) # sort them alphabetically
+
+## MAF file names to be downloaded - selecting single MAF files per cancer occured on the basis of availability, date, curation status and sequencing method
+selectedGDCdata <- c("733bc880-b631-4d7e-8189-80dc20bdd140", "1c0382a7-c3ca-40fd-ba3c-029c4529214f", "87ac6b5b-806e-4de0-b8d8-ae6888759667", "a707c566-b0d3-4025-b921-752fe92ed5e7", "a8532d87-1eae-4289-8aea-3255d7b313cf", "3437ecf9-355d-4d35-afb4-ffe1a705c206", "9e9d181f-582a-45d4-8189-ae0f9b71eed4", "226b7c4e-240b-4d33-94e6-5a2546c5d9e2", "7abdba45-acfd-4e8d-a297-3f4af85362ad", "eef3cf7c-8965-4f56-b458-7130323dfdc2", "fd8c3eb2-fc8c-4b09-aa2f-2d12ad3092ad", "3e93f2c1-559f-4747-9c53-30589dbc03f7", "c61f686c-29b1-4db4-83f1-366ebecc6b45", "249baa49-b066-465c-af14-31ce31653bba", "bd2fa5f1-3a9c-4ba6-b857-f204e571838e", "e8d53275-c082-46e3-b9fa-4c05d188e750", "9218c7f6-b78d-45ef-9dcc-eecff55784cd", "42084331-06c4-42c6-8d40-a1a89141c809", "bcf70bb7-c5f9-4885-bf01-060295e4c6ed", "f5a1907e-f429-4743-a822-cf24383f8cf9", "be468970-59f3-4722-9a4e-bffa2ca272b2", "e07d6602-371a-4d99-abf6-3a16fb4d153e", "148f9960-c006-4bf2-94b4-2520ca493463", "e1b333d6-c5e8-42c3-b278-64b7fc9ed1f2", "99990ef4-5716-4274-b9e9-0ea7d7fbb0a0", "0aaab448-a53f-4c40-a7d5-3e9e3e7ccc6e", "cc003009-cbdc-459a-a2bc-27927448b5ce", "e44cb8a8-abdc-4ff1-bb6e-3bdfcdc48d5a", "cffd19ba-5b3e-4073-b642-327453e5486e", "68d30cc7-ca55-4c8b-a426-92549e465e9a", "fa821597-1ca5-4257-88d6-5cbb4f11e736", "07526387-4065-42a5-a67f-11fa016ca224", "f2c8aa6d-4e66-4b1f-84dc-7adb50d4c613")
+
+## 3.) Downloading TCGA data
+# looping through all the TCGA projects to download selected MAF data
+allqueries_TCGAproject = vector()
+for (TCGAproject in TCGAprojects) {
+  query_TCGAproject <- GDCquery(project = TCGAproject, 
+                                data.category = "Simple nucleotide variation",
+                                data.type = "Simple somatic mutation",
+                                access = "open",
+                                legacy = TRUE) # GRCh37/hg19 version
+  query_TCGAproject$results[[1]] <- filter(query_TCGAproject$results[[1]], id %in% selectedGDCdata)
+  allqueries_TCGAproject <- rbind(allqueries_TCGAproject, query_TCGAproject)
+  GDCdownload(query_TCGAproject)
+}
+
+## 4.) Preprocessing on the terminal line (includes: adding filenames to each line, keeping the first 34 columns, excluding comment lines and additional header lines)
+# output file: allGDC_preprocessed
+
+############################# LOADING the preprocessed file
+## 1.) Loading allGDC_preprocessed file in RStudio
+allGDC_preprocessed <- data.table:::fread("/Users/macbookpro/Desktop/CAPSTONE/RStudio files/GDCdata/allGDC_preprocessed", sep = '\t', stringsAsFactors = FALSE, fill=TRUE, header=TRUE, verbose = TRUE) #NB! not .txt
+
+# 2.) Changing the very first column value to 'File_Name'
+colnames(allGDC_preprocessed)[1] <- 'File_Name'
+write.table(allGDC_preprocessed,  file  ="~/Desktop/CAPSTONE/RStudio files/allGDC_preprocessed.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+############################# PATIENT FILTERING
+## 0.) Downloading METADATA for each distinct sample in the dataframe
+allGDCmeta <- lapply(TCGAprojects, FUN= GDCquery_clinic, 'biospecimen') # takes LONG!, gives large list
+# ff <- file("~/Desktop/CAPSTONE/RStudio files/ffpe.txt", open="wt")
+ffpe <- allGDCmeta  %>%
+  bind_rows() %>%
+  select(sample_type_id, sample_id, sample_type, submitter_id, is_ffpe)
+write.table(ffpe, file  ="~/Desktop/CAPSTONE/RStudio files/ffpe.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+## 1.) Dissect Tumor_Sample Barcode
+allGDC_processed <- allGDC_preprocessed  %>%
+  separate(col="Tumor_Sample_Barcode", into=c("Project","TSS", "Participant","Sample_and_vial", "Portion_and_analyte", "Plate", "Center"), sep="-", remove=FALSE) %>%
+  unite(col="Patient", Project, TSS, Participant, sep="-", remove=FALSE)  %>%
+  unite(col="Specimen", Project, TSS, Participant, Sample_and_vial, sep="-", remove=FALSE)
+write.table(allGDC_processed,  file  ="~/Desktop/CAPSTONE/RStudio files/allGDC_processed.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+GDC_allcancers = vector()
+for (i in 1:33)  {
+  GDC_query_results <- allqueries_TCGAproject$results[[i]][, c("cases", "project", "file_name", "id")] #CHANGE cases to Tumor_Sample_Barcode later
+  GDC_allcancers <- rbind(GDC_allcancers, GDC_query_results)
+}
+GDC_allcancers <- dplyr:::rename(GDC_allcancers, Tumor_Sample_Barcode = cases)
+GDC_allcancers <- dplyr:::rename(GDC_allcancers, File_Name = file_name)
+GDC_allcancers <- dplyr:::rename(GDC_allcancers, Study = project) # alternatively: colnames(GDC_allcancers)[11] <- 'Study' %>%
+
+GDC_allcancers <- #(33 x 4)
+  separate_rows(GDC_allcancers, Tumor_Sample_Barcode, sep=",") %>% #8223 x 4
+  separate(col="Tumor_Sample_Barcode", into=c("Project","TSS", "Participant","Sample_and_vial", "Portion_and_analyte", "Plate", "Center"), sep="-", remove=FALSE) %>% #8223 × 11
+  unite(col="Patient", Project, TSS, Participant, sep="-", remove=FALSE)  %>% #8223 x 12
+  unite(col="Specimen", Project, TSS, Participant, Sample_and_vial, sep="-", remove=FALSE) #8223 x 13
+write.table(GDC_allcancers,  file  ="~/Desktop/CAPSTONE/RStudio files/GDC_allcancers.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+## 2.) Actual filtering steps
+# excluding samples flagged by the creators of the ASCAT algorithm 
+ascat_exclus = c("TCGA-05-4403", "TCGA-06-2559", "TCGA-12-3651", "TCGA-25-1877", "TCGA-26-5135", "TCGA-2G-AAEW", "TCGA-77-6842-a", "TCGA-86-8054", "TCGA-91-A4BD", "TCGA-97-8179", "TCGA-A5-A2K4", "TCGA-A8-A07L", "TCGA-AB-2812", "TCGA-AB-2843", "TCGA-AB-2847", "TCGA-AB-2855", "TCGA-AB-2856", "TCGA-AB-2887", "TCGA-AB-2891", "TCGA-AB-2909", "TCGA-AB-2913", "TCGA-AB-2924", "TCGA-AB-2944", "TCGA-AB-2954", "TCGA-AB-2997", "TCGA-AB-3008", "TCGA-AC-A2QJ", "TCGA-AH-6547", "TCGA-AP-A0LQ", "TCGA-AY-4071", "TCGA-BH-A1EW", "TCGA-BJ-A28W-a", "TCGA-BK-A139-e", "TCGA-BM-6198", "TCGA-BT-A20U", "TCGA-C5-A1MK", "TCGA-CG-5717", "TCGA-CH-5753", "TCGA-CH-5769", "TCGA-CV-6441", "TCGA-D8-A146", "TCGA-D8-A1XC", "TCGA-DD-AAEH", "TCGA-DJ-A2Q2", "TCGA-DM-A1D6", "TCGA-E2-A15G", "TCGA-EE-A29D", "TCGA-EY-A1G8", "TCGA-FD-A62N", "TCGA-FS-A4F0", "TCGA-GS-A9U4", "TCGA-P5-A72U", "TCGA-UZ-A9PJ", "TCGA-04-1351", "TCGA-04-1371", "TCGA-06-0178", "TCGA-57-1586", "TCGA-V5-AASX-b")
+
+allGDC_filtered_p <- allGDC_processed %>% #(2539957, 43)
+  filter(Tumor_Sample_Barcode %in% GDC_allcancers$Tumor_Sample_Barcode | Matched_Norm_Sample_Barcode %in% GDC_allcancers$Tumor_Sample_Barcode) %>% #(2364572 x 43)
+  filter(!Patient %in% ascat_exclus) %>% #(2353860, 43)
+  filter(Specimen %in% ffpe[ffpe$is_ffpe==FALSE,]$submitter_id) %>% #(2351450, 43)
+  filter(grepl("01|03|09", Sample_and_vial)) %>% #(2015633 x 43) 
+  left_join(GDC_allcancers,by =c('Patient', 'Tumor_Sample_Barcode', 'Specimen', 'Project', 'TSS', 'Participant', 'Sample_and_vial', 'Portion_and_analyte', 'Plate', 'Center')) %>% #(2015633 x 46)
+  arrange(Sample_and_vial, desc(Plate),Portion_and_analyte) %>% #(2015633 x 46)
+  group_by(Patient) %>% filter(Tumor_Sample_Barcode==first(Tumor_Sample_Barcode)) %>% ungroup() #(1974388 x 46)
+write.table(allGDC_filtered_p,  file  ="~/Desktop/CAPSTONE/RStudio files/allGDC_filtered_p.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+############################# VARIANT FILTERING
+
+allGDC_filtered_v <- allGDC_filtered_p %>% #(1974388 x 46)
+  filter(Variant_Type == 'SNP') %>% #(1667874 x 46) # exclude INDELS and oligonucleotide substitutions incl. di- and tri-
+  filter(!Validation_Status %in% c('Inconclusive')) %>% #(1666682 x 46) # exclude inconclusive data
+  filter(Variant_Classification %in% c('Missense_Mutation', 'Silent', 'Nonsense_Mutation', 'Translation_Start_Site', 'Nonstop_Mutation')) #(1575082 x 46)
+
+######### Looking for DNPs and oligonucleotides (2 SNPs potentially right next to each other within the same gene)
+positions <- allGDC_filtered_v[,c(1,2,5:7,16)] # select relevant columns: File_Name,Hugo_Symbol, Chromosome, Start_position, End_position, Tumor_Sample_Barcode
+positions <- positions %>% group_by(Chromosome) %>% arrange(Start_position) %>% distinct() # order them and keep 1 mutation per gene per sample (TOTAL 1,553,803 entries)
+position_diff <- diff(positions$Start_position) # calculate the nucleotide difference between positions for every column
+position_diff <- c(NA, position_diff) # create a vector, starting with zero
+positions$position_diff <- position_diff # append vector values to a new column
+
+barcode_diff <- as.numeric(c(NA, positions$Tumor_Sample_Barcode[-1] == positions$Tumor_Sample_Barcode[-nrow(positions)]))
+positions$barcode_diff <- barcode_diff
+potentialDNPs <-filter(positions, (position_diff == 1 & barcode_diff == 1 & lead(Chromosome) == Chromosome) | (lead(position_diff) == 1 & lead(barcode_diff) == 1 & lead(Chromosome) == Chromosome)) # both rows of the pair, TOTAL 14,459 entries
+
+allGDC_filtered_v <- allGDC_filtered_v %>% anti_join(potentialDNPs, by = c("Hugo_Symbol", "Chromosome", "Start_position", "End_position", "Tumor_Sample_Barcode", "File_Name.x")) #1560881 x 46
+
+##### CORRECTING for various gene name mistakes that probably arose in Excel
+# to inspect Hugo_Symbols left after filtering:
+write.table(allGDC_filtered_v$Hugo_Symbol,  file  ="~/Desktop/CAPSTONE/RStudio files/HS_allGDC_filtered_v.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+
+### running scanner:
+# bash: cd /Users/macbookpro/Desktop/CAPSTONE/RStudio files
+# chmod +x SymbolMutationScan.sh
+#./SymbolMutationScan.sh HS_allGDC_filtered_v.txt > incorrect_HS_allGDC.txt
+
+### making the Hugo_symbol corrections based on the results of the scan:
+incorrect_HS_allGDC <- fread("/Users/macbookpro/Desktop/CAPSTONE/RStudio files/incorrect_HS_allGDC.txt", sep = '\t', stringsAsFactors = FALSE, fill=TRUE, header=TRUE, verbose = TRUE)
+colnames(incorrect_HS_allGDC)[1] = "incorrect_HS"
+incorrect_HS_allGDC <- distinct(incorrect_HS_allGDC) %>% arrange(incorrect_HS)
+
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^DEC(?=[1-9])", "DELEC")
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^MARCH(?=[1-9])", "MARCHF")
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^SEPT(?=[1-9])", "SEPTIN") 
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^1-Mar", "MARCHF1") 
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^12-Sep", "SEPTIN12") 
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^14-Sep", "SEPTIN14") 
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^1SEPT4", "SEPTIN14") #the scan doesnt pick this up, but data contains it!!!
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^2-Sep", "SEPTIN2") 
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^6-Sep", "SEPTIN6")
+allGDC_filtered_v$Hugo_Symbol <- str_replace_all(allGDC_filtered_v$Hugo_Symbol, "^8-Sep", "SEPTIN8")
+
+write.table(allGDC_filtered_v,  file  ="~/Desktop/CAPSTONE/RStudio files/allGDC_filtered_v.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+###### STATISTICS of data
+## 1.) Plotting number of mutations per genes
+mutations_per_genes <- allGDC_filtered_v %>% count(Hugo_Symbol, name="mutations") #easiest way to get the same result
+freq_mutations_per_genes <- mutations_per_genes %>% count(mutations, name="frequency")
+ggplot(mutations_per_genes, aes(x = mutations)) + geom_density()
+
+most_mutated_genes <- mutations_per_genes %>% filter(mutations > 1000) %>% arrange(desc(mutations))
+most_mutated_genes_list <- list(most_mutated_genes$Hugo_Symbol)
+write.table(most_mutated_genes_list,  file  ="~/Desktop/CAPSTONE/RStudio files/most_mutated_genes_list.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+
+ggplot(most_mutated_genes, aes(x=reorder(Hugo_Symbol, mutations), y =mutations)) + geom_bar(stat = "identity") + coord_flip()
+
+# Correct for the length of genes to get the most ,uattaed genes
+corr_freq <- function(count, start, end) {
+  corrected_frequency <- count/(end-start)
+  return(corrected_frequency)
+}
+
+
+
