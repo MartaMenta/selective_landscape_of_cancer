@@ -1,3 +1,4 @@
+########################### PART 1
 ## 0.) Setting my working directory
 setwd("~/Desktop/CAPSTONE/RStudio files")
 
@@ -9,6 +10,17 @@ install.packages("ggplot2")
 install.packages("tidyverse")
 install.packages("devtools")
 library(devtools); install_github("im3sanger/dndscv")
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("biomaRt")
+BiocManager::install("fgsea")
+install.packages('biomartr')
+install.packages("gprofiler2")
+install.packages("ontologyIndex")
+install.packages("ontologySimilarity")
+install.packages("hexbin") # to be able to use stat_binhex() which bins data into hexagons and helps with overplotting (https://r-graphics.org/recipe-scatter-overplot)
+install.packages("ggpubr") # to add correlation coefficient
+install.packages("qqman")
 
 ## 2.) Opening the relevant libraries
 library(TCGAbiolinks)
@@ -20,6 +32,15 @@ library(tidyr)
 library(tidyselect)
 library(ggplot2)
 library(tidyverse)
+library(biomaRt)
+library(biomartr)
+library(ontologyIndex)
+library(ontologySimilarity)
+library(hexbin)
+library(ggpubr)
+library(gprofiler2)
+library(qqman)
+library(gtools)
 
 ## 2.) Inspecting TCGA data
 TCGAprojects <- TCGAbiolinks::getGDCprojects()$project_id # list of projects ids of projects included in the TCGA library
@@ -156,17 +177,548 @@ mutations_per_genes <- allGDC_filtered_v %>% count(Hugo_Symbol, name="mutations"
 freq_mutations_per_genes <- mutations_per_genes %>% count(mutations, name="frequency")
 ggplot(mutations_per_genes, aes(x = mutations)) + geom_density()
 
+## 2.) Plotting most mutated genes
 most_mutated_genes <- mutations_per_genes %>% filter(mutations > 1000) %>% arrange(desc(mutations))
 most_mutated_genes_list <- list(most_mutated_genes$Hugo_Symbol)
 write.table(most_mutated_genes_list,  file  ="~/Desktop/CAPSTONE/RStudio files/most_mutated_genes_list.txt", col.names= F, row.names= F, quote= F, sep= '\t')
-
 ggplot(most_mutated_genes, aes(x=reorder(Hugo_Symbol, mutations), y =mutations)) + geom_bar(stat = "identity") + coord_flip()
 
-# Correct for the length of genes to get the most ,uattaed genes
+## 3.) Plotting most mutated genes corrected for gene length
+# defining function to do the calculation of correction
 corr_freq <- function(count, start, end) {
   corrected_frequency <- count/(end-start)
   return(corrected_frequency)
 }
+
+# importing hsapiens data (from Ensembl) to obtain details for gene length (in nucleotides)
+Ensembl_Hsapiens <- fread("~/Desktop/CAPSTONE/RStudio files/Ensembl_Hsapiens_features.txt", sep = '\t', stringsAsFactors = FALSE, fill=TRUE, header=TRUE, verbose = TRUE)
+distinct_genes_w_positions <- data.frame(Hugo_Symbol = Ensembl_Hsapiens$`HGNC symbol`, Start_position = Ensembl_Hsapiens$`Gene Start (bp)`, End_position = Ensembl_Hsapiens$`Gene End (bp)`) 
+distinct_genes_w_positions <- left_join(mutations_per_genes, distinct_genes_w_positions, by= c('Hugo_Symbol'), keep = F)
+
+# calculating the corrected 'mutatedness' = corrected count of mutations
+corrected_count <- distinct_genes_w_positions %>% 
+  mutate(corrected_frequency = corr_freq(distinct_genes_w_positions$mutations, distinct_genes_w_positions$Start_position, distinct_genes_w_positions$End_position)) %>%
+  mutate(corr_freq_x100 = corrected_frequency * 100) # 26,468 x 4
+
+corrected_count.sub <- na.omit(corrected_count[1:6])
+corrected_count.sub <- as.data.frame(corrected_count.sub) # 23,479 x 6
+corrected_count.sub <- corrected_count.sub %>% distinct() # 21,557 x 6
+corrected_count.sub <- corrected_count.sub %>% arrange(desc(corr_freq_x100))
+
+most_mutated_genes_c <- filter(corrected_count.sub, corr_freq_x100 > 1)
+most_mutated_genes_c <- list(most_mutated_genes_c$Hugo_Symbol) # 2,585
+write.table(most_mutated_genes_c,  file  ="~/Desktop/CAPSTONE/RStudio files/most_mutated_genes_c.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+
+ggplot(corrected_count.sub, aes(x=mutations, y =corrected_frequency)) + geom_bar(stat = "identity")
+ggplot(corrected_count.sub, aes(x = corrected_frequency)) + geom_density()
+ggplot(corrected_count.sub, aes(x=reorder(Hugo_Symbol, mutations), y =mutations > 30)) + geom_bar(stat = "identity") + coord_flip()
+
+# running a broad GO term mapping on most mutated genes and on most mutated genes that have been corrected for length
+most_mutated_genes_df <- mutations_per_genes %>% arrange(desc(mutations))
+colnames(most_mutated_genes_df)[1] = "gene_name" #22278
+most_mutated_genes_c_df <- data.frame(gene_name = most_mutated_genes_c[[1]]) #2585
+
+most_mutated_genes_GOterms <- left_join(most_mutated_genes_df, GO_gene_table, by = "gene_name") #22,278 entries
+most_mutated_genes_c_GOterms <- left_join(most_mutated_genes_c_df, GO_gene_table, by = "gene_name") #2,585 entries
+
+most_mutated_GO <- most_mutated_genes_GOterms %>% count(GOname) %>% arrange(desc(n))
+most_mutated_c_GO <- most_mutated_genes_c_GOterms %>% count(GOname)  %>% arrange(desc(n))
+
+## 4.) Plotting number of mutations per samples (across genes)
+mutations_per_samples <- allGDC_filtered_v %>% count(Tumor_Sample_Barcode, name="mutations")
+ggplot(mutations_per_samples, aes(x=Tumor_Sample_Barcode, y =mutations)) + geom_bar(stat = "identity") + coord_flip()
+
+freq_mutations_per_samples <- mutations_per_samples %>% count(mutations, name = "frequency")
+ggplot(freq_mutations_per_samples, aes(x=mutations, y =frequency)) + geom_bar(stat = "identity")
+ggplot(mutations_per_samples, aes(x = mutations)) + geom_density()
+
+most_mutated_samples <- mutations_per_samples %>% filter(mutations > 7000)
+ggplot(most_mutated_samples, aes(x=reorder(Tumor_Sample_Barcode, mutations), y =mutations)) + geom_bar(stat = "identity") + coord_flip()
+
+## 5.) Analyzing number of mutations per genes in different studies
+# Take relevant columns from the filtered allGDC data
+gene_study_pairs <- data.frame(gene_name = allGDC_filtered_v$Hugo_Symbol, study =allGDC_filtered_v$Study) #1560623
+# create table of number of mutations per gene per study
+muts_per_gene_per_study <- gene_study_pairs %>% count(gene_name, study, name = "count") %>% group_by(gene_name) %>% arrange(desc(count), .by_group = TRUE)
+
+# create a more concise table of gene-wise summary
+muts_per_gene_across_studies_1 <- muts_per_gene_per_study %>% count(gene_name, name = "study")
+muts_per_gene_across_studies_2 <- summarise()
+  
+  muts_per_gene_per_study  %>% count(count, name = "count")
+muts_per_gene_across_studies <- left_join(muts_per_gene_across_studies_1 , muts_per_gene_across_studies_2)
+
+left_join(dNdS_for_visualisation_GO, allGDC_filtered_v, by = ("gene_name"))
+
+############################# RUNNING dNdScv
+# 1.) Before running dndscv, checking two arguments of the function manually: (+ print values to be able to compare with dndscv warning messages printed while running function too)
+muts_per_gene_per_sample <- allGDC_filtered_v %>% count(Hugo_Symbol, Tumor_Sample_Barcode) #change n to $max_muts_per_gene_per_sample value specified in dndscv arguments
+muts_per_gene_per_sample_INCL <- allGDC_filtered_v %>% count(Hugo_Symbol, Tumor_Sample_Barcode) %>% filter(!n>3) %>% arrange(desc(n))
+muts_per_gene_per_sample_EXCL <- allGDC_filtered_v %>% count(Hugo_Symbol, Tumor_Sample_Barcode) %>% filter(n>3) %>% arrange(desc(n))
+print(paste0("muts_per_gene_per_sample_INCL: ", nrow(muts_per_gene_per_sample_INCL)))
+print(paste0("muts_per_gene_per_sample_EXCL: ", nrow(muts_per_gene_per_sample_EXCL)))
+
+coding_muts_per_sample <- allGDC_filtered_v %>% count(Tumor_Sample_Barcode) #change n to $max_coding_muts_per_sample value specified in dndscv arguments
+coding_muts_per_sample_INCL <- allGDC_filtered_v %>% count(Tumor_Sample_Barcode) %>% filter(!n>3000) %>% arrange(desc(n))
+coding_muts_per_sample_EXCL <- allGDC_filtered_v %>% count(Tumor_Sample_Barcode) %>% filter(n>3000) %>% arrange(desc(n))
+print(paste0("coding_muts_per_sample_INCL: ", nrow(coding_muts_per_sample_INCL)))
+print(paste0("coding_muts_per_sample_EXCL: ", nrow(coding_muts_per_sample_EXCL)))
+
+### Preparing dndscv INPUT
+allGDC_for_dndscv <- allGDC_filtered_v %>%
+  select(Tumor_Sample_Barcode, Chromosome, Start_position, Reference_Allele, Tumor_Seq_Allele2)
+write.table(allGDC_for_dndscv, file ="~/Desktop/CAPSTONE/RStudio files/allGDC_for_dndscv.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+### Running dndscv
+allGDC_for_dndscv <- as.data.frame(allGDC_for_dndscv)
+allGDC_dndscv <- dndscv(mutations=allGDC_for_dndscv, refdb='hg19', outp=3)
+
+## Saving relevant output for analysis
+write.table(allGDC_dndscv$globaldnds, file ="~/Desktop/CAPSTONE/RStudio files/1_globaldnds.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$sel_cv, file ="~/Desktop/CAPSTONE/RStudio files/2_sel_cv.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$sel_loc, file ="~/Desktop/CAPSTONE/RStudio files/3_sel_loc.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$annotmuts, file ="~/Desktop/CAPSTONE/RStudio files/4_annotmuts.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$genemuts, file ="~/Desktop/CAPSTONE/RStudio files/5_genemuts.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$mle_submodel, file ="~/Desktop/CAPSTONE/RStudio files/6_mle_submodel.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$exclsamples, file ="~/Desktop/CAPSTONE/RStudio files/7_exclsamples.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$exclmuts, file ="~/Desktop/CAPSTONE/RStudio files/8_exclmuts.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+write.table(allGDC_dndscv$wrongmuts, file ="~/Desktop/CAPSTONE/RStudio files/9_wrongmuts.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+############################ Interpreting dndscv output data
+# 1.) annotmuts = Annotated coding mutations (1,169,468 entries)
+View(annotmuts)
+# looking at 'impact' column
+distinct(annotmuts[,15])
+# 1:         Missense
+# 2:       Synonymous # also known as SILENT
+# 3:         Nonsense
+# 4:        Stop_loss # also known as NONSTOP
+# 5: Essential_Splice ## I DIDNT INCLUDE SPLICE SITE <- it could be the source of low value of splice site dN/dS
+# would it be translational start site??? (I inlcuded those and not named here)
+annotmuts_T7 <- fread("/Users/macbookpro/Desktop/CAPSTONE/RStudio files/T7_4_annotmuts.txt", sep = '\t', stringsAsFactors = FALSE, fill=TRUE, header=T, verbose = TRUE)
+distinct(annotmuts_T7[,15]) #no change in chategories, just in numbers, but not significant 
+
+# 2.) genemuts = observed and expected number of mutations per gene
+View(genemuts)
+# contains all the different genes (20,091 entries), the number of their 4 types of mutations
+# and the expected numbers of the 4 types of mutations per genes = expected estimated density of mutations in a given gene under neutrality
+# whats the difference between exp_syn and exp_syn_cv values??
+
+# table can be used to look at most mutated genes, Color types of mutations!
+# <-> compare with most_mutated_genes graphs above
+genemuts_f <- genemuts %>% mutate(n_all = (n_syn + n_mis + n_non + n_spl)) %>% arrange(desc(n_all)) %>% filter(n_all > 500)
+ggplot(genemuts_f, aes(x=gene_name, y =n_all)) + geom_bar(stat = "identity") + coord_flip()
+
+
+# 3.) mle_submodel = Maximum Likelihood Estimates substituation model
+View(mle_submodel)
+# rates estimated for the substitution model
+# estimated rates of each of the substitution types (first column) - 195 rows/possibilities instead of the 192 possible mutations
+# and the 95% confidence intervals around it (2nd and 3rd columns) - cilow and cihigh (95% of the time value is inbtw these limits)
+# ERROR in output table !!!
+
+# 4.) exclsamples = list of excluded samples
+View(exclsamples) # 44 in TOTAL
+# 1 column (x) which contains the Tumor_Sample_Barcode
+# coincides with the number of excluded samples exceeding the maximum number of coding mutations per sample (3000)
+View(coding_muts_per_sample_EXCL)
+
+## GRAPH of all genes hypermutated in these samples
+ggplot(coding_muts_per_sample_EXCL, aes(x=(`Tumor_Sample_Barcode`), y=(`n`))) + geom_point(aes())
+
+# Include functional GO here too!
+
+# 5.) exclmuts = coding mutations excluded from the analysis
+View(exclmuts) # 6,151 entries in TOTAL
+
+filter(exclmuts, sampleID %in% exclsamples$x) #mutations in already exluded samples are not included in this
+filter(exclmuts, sampleID %in% muts_per_gene_per_sample_EXCL$Tumor_Sample_Barcode) #all of the excluded mutations are part of the list of samples that have higher than 3 mutations per gene
+filter(muts_per_gene_per_sample_EXCL, !Tumor_Sample_Barcode %in% exclmuts$sampleID)
+
+muts_per_gene_per_sample_EXCL_f <- muts_per_gene_per_sample_EXCL %>% group_by(Tumor_Sample_Barcode) %>% summarise(Mutations_per_sample = sum(n))
+# Mutations_per_sample means number of mutations of all the genes that have more than 3 mutations separately 
+
+exclmuts %>% distinct(sampleID, chr, pos)
+
+# 6.) wrongmuts 
+# mutations with wrong annotation of the reference base
+View(wrongmuts) # 233 in TOTAL
+
+########################### PART 2
+#### 1.) Inspecting data for retrieval
+ensembl = useMart(biomart="ENSEMBL_MART_ENSEMBL", host="https://feb2014.archive.ensembl.org", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")
+listDatasets(ensembl)
+
+########### 2.) Querying data through biomaRt from Ensembl: http://feb2014.archive.ensembl.org/
+# use getBM() function, but first figure out the arguments
+## a) attributes
+atr <- listAttributes(ensembl)
+table(atr$page)
+# feature_page         homologs        sequences              snp        structure transcript_event 
+# 141                   857               49                 61               31            10
+nrow(atr) # 1149 total number of attributes
+atr_homologs <- filter(atr, page=='homologs')
+atr_features <- filter(atr, page=="feature_page")
+View(atr_features)
+# attributes to use: "ensembl_gene_id", "hgnc_symbol", "entrezgene", "chromosome_name", "start_position", "end_position"
+View(atr_homologs)
+# attributes to use: "ensembl_gene_id", "start_position", "end_position", "mmusculus_homolog_ensembl_gene", "mmusculus_homolog_chromosome", "mmusculus_homolog_orthology_type", "mmusculus_homolog_dn", "mmusculus_homolog_ds"
+
+## b) filters
+filt <- listFilters(ensembl)
+View(filt)
+# "with_homolog_mmus" == Orthologous Mouse Genes
+
+########### 2.1.) Querying Hsapiens data w/arguments from features
+Ensembl_Hsapiens <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene", "chromosome_name", "start_position", "end_position"), filters = "hgnc_symbol", values = allGDC_filtered_v$Hugo_Symbol, mart = ensembl) # around 10-15 mins, 1'307'256 x 6
+
+#### Filtering Ensembl_HSapiens = Correcting for various gene name mistakes that probably arose in Excel
+# to run Scan on Hugo Symbols:
+write.table(Ensembl_Hsapiens$hgnc_symbol,  file  ="~/Desktop/CAPSTONE/RStudio files/HS_Ensembl_Hsapiens.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+
+# run scan:
+# bash: chmod +x SymbolMutationScan.sh
+# ./SymbolMutationScan.sh HS_Ensembl_Hsapiens.txt > incorrect_HS_Hsapiens.txt
+
+# import scanned, incorrect HS-s to be able to filter them out
+incorrect_HS_HSapiens <- fread("/Users/macbookpro/Desktop/CAPSTONE/RStudio files/incorrect_HS_Hsapiens.txt", sep = '\t', stringsAsFactors = FALSE, fill=TRUE, header=TRUE, verbose = TRUE)
+colnames(incorrect_HS_HSapiens)[1] = "incorrect_HS"
+incorrect_HS_HSapiens <- distinct(incorrect_HS_HSapiens) %>% arrange(incorrect_HS)
+View(incorrect_HS_HSapiens)
+
+# after inspecting incorrect HS-s, filter accordingly:
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^DEC(?=[1-9])", "DELEC")
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^MARCH(?=[1-9])", "MARCHF")
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^SEPT(?=[1-9])", "SEPTIN") 
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^1-Mar", "MARCHF1") 
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^12-Sep", "SEPTIN12") 
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^14-Sep", "SEPTIN14") 
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^2-Sep", "SEPTIN2") 
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^6-Sep", "SEPTIN6")
+Ensembl_Hsapiens$hgnc_symbol <- str_replace_all(Ensembl_Hsapiens$hgnc_symbol, "^8-Sep", "SEPTIN8")
+
+########### 2.2.) Querying Mouse data w/arguments from homologs (w/ mmusculus)
+Ensembl_Mouse <- getBM(attributes = c("ensembl_gene_id", "start_position", "end_position", "mmusculus_homolog_ensembl_gene", "mmusculus_homolog_orthology_type", "mmusculus_homolog_dn", "mmusculus_homolog_ds"), filters = "ensembl_gene_id", values = Ensembl_Hsapiens$ensembl_gene_id, mart = ensembl) # around 15 mins, 1'310'757 x 6
+
+########### 3.) Filtering & joining Ensembl files & Calculating dN/dS values
+Ensembl_Mouse <- filter(Ensembl_Mouse, mmusculus_homolog_orthology_type=="ortholog_one2one") %>% #915'277 x 7
+  drop_na() %>% #914'549 x 7
+  mutate(`dN/dS` = (mmusculus_homolog_dn / mmusculus_homolog_ds)) %>% #914'549 x 8
+  distinct() #15'607 x 8
+
+germline_dNdS <- left_join(Ensembl_Mouse, Ensembl_Hsapiens, by = c("ensembl_gene_id", "start_position", "end_position")) %>% distinct() # 16'093 x 11
+
+germline_dNdS <- germline_dNdS[, c(1, 9:11, 2:5, 8, 6:7)] # 16'093 x 11
+colnames(germline_dNdS)
+colnames(germline_dNdS) <- c("Ensembl_id", "Hugo_symbol", "Entrez_id", "Chromosome", "Start_position", "End_position", "Mouse_Ensembl_id", "Homology_type", "dN/dS", "Mouse_dN", "Mouse_dS")
+write.table(germline_dNdS,  file  ="~/Desktop/CAPSTONE/RStudio files/germline_dNdS.txt", col.names= T, row.names= F, quote= F, sep= '\t')
+
+########### 4.) Preparing the data for visualization
+# cancer_dNdS = wmis_cv from sel_cv dndscv output
+dNdS_germline_relevant <- germline_dNdS[,c(1, 2, 4, 5, 6, 9)]
+dNdS_cancer_mis <- sel_cv[,c(1,6)]
+colnames(dNdS_germline_relevant)[2] = "gene_name"
+colnames(dNdS_germline_relevant)[6] = "dN/dS_germline"
+colnames(dNdS_cancer_mis)[2] = "dN/dS_cancer"
+dNdS_for_visualisation <- left_join(dNdS_germline_relevant, dNdS_cancer_mis, by = "gene_name") %>% distinct() %>% drop_na() #15'574 x 7
+
+ggplot(dNdS_for_visualisation, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`)) + geom_point(aes())
+
+### Investigating genes with Zero dN/dS values
+zeros <- dNdS_for_visualisation %>% filter(`dN/dS_cancer` == 0 | `dN/dS_germline` == 0) #259 x 7 (contains genes only)
+colnames(zeros)[2] = "Hugo_Symbol" #259 x 7
+zeros <- left_join(zeros, allGDC_filtered_v, by = "Hugo_Symbol") %>% #7187 x 52 (contains all mutations per genes)
+  distinct() #7187 x 52
+
+zeros_cancer <- zeros %>% filter(`dN/dS_cancer` == 0) %>% arrange(desc(`dN/dS_germline`)) #128 (32 genes)
+zeros_germline <- zeros %>% filter(`dN/dS_germline` == 0) %>% arrange(desc(`dN/dS_cancer`)) #7074 (230 genes)
+
+zeros %>% distinct(Mutation_Status)
+zeros_cancer %>% distinct(Center)
+zeros_germline %>% distinct(Center)
+
+# See if any of the wrongly annotated or excluded samples/mutations from dndscv output match the ones with zero dN/dS
+colnames(exclsamples)[1] = "Tumor_Sample_Barcode" #44 distinct Tumor_Sample_Barcode
+colnames(exclmuts)[1] = "Tumor_Sample_Barcode" #273 mutations, 10 distinct Tumor_Sample_Barcode, 12 distinct genes
+colnames(wrongmuts)[1] = "Tumor_Sample_Barcode" #233 mutations, 131 distinct Tumor_Sample_Barcode
+
+colnames(exclmuts)[2] = "Chromosome.y"
+colnames(exclmuts)[3] = "Start_position.y"
+colnames(exclmuts)[4] = "Reference_Allele"
+colnames(exclmuts)[5] = "Tumor_Seq_Allele_2"
+colnames(exclmuts)[9] = "Hugo_Symbol"
+
+colnames(wrongmuts)[2] = "Chromosome.y"
+colnames(wrongmuts)[3] = "Start_position.y"
+colnames(wrongmuts)[4] = "Reference_Allele"
+colnames(wrongmuts)[5] = "Tumor_Seq_Allele_2"
+
+zeros %>% distinct(Tumor_Sample_Barcode) %>% semi_join(exclsamples) # all 44
+zeros %>% distinct(Tumor_Sample_Barcode) %>% semi_join(exclmuts) # 8 out of 10 
+zeros %>% distinct(Tumor_Sample_Barcode) %>% semi_join(wrongmuts) # 37 out of 131
+
+zeros %>% distinct(Hugo_Symbol) %>% semi_join(exclmuts) # 0 out of the 12 distinct genes
+zeros %>% semi_join(exclmuts, by = c("Hugo_Symbol", "Chromosome.y", "Start_position.y", "Reference_Allele", "Tumor_Sample_Barcode")) # 0 out of the 273 mutations
+zeros %>% semi_join(wrongmuts, by = c("Chromosome.y", "Start_position.y", "Reference_Allele", "Tumor_Sample_Barcode")) # 0 out of the 233 mutations
+
+write.table(zeros %>% distinct(Hugo_Symbol),  file  ="~/Desktop/CAPSTONE/RStudio files/zeros_all.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+write.table(zeros_germline %>% distinct(Hugo_Symbol),  file  ="~/Desktop/CAPSTONE/RStudio files/zeros_germline.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+write.table(zeros_cancer %>% distinct(Hugo_Symbol),  file  ="~/Desktop/CAPSTONE/RStudio files/zeros_cancer.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+
+########### 5.) ATTACHING GO_terms to genes > as a separate column in the table
+# Method: Loading ontology_indices with GO data to be subset (https://cran.r-project.org/web/packages/ontologySimilarity/vignettes/ontologySimilarity-GO-example.html)
+
+data(go) #gives a large ontology_index, users can subset it to obtain GO annotation for their genes of interest, using a character vector of gene names.
+data(gene_GO_terms)
+
+GO_terms_list <- gene_GO_terms[c(dNdS_for_visualisation$gene_name)] # 15'574 elements, process named list:
+GO_terms <- sapply(GO_terms_list, function(x) x[1]) # take the name & the first item of each element in the named list, SAME as: sapply(d, "[[", 1)
+GO_terms <- plyr::compact(GO_terms) %>% as.data.frame() %>% data.table::transpose(keep.names = "gene_name") # arrange it into a well formatted data frame
+colnames(GO_terms)[2] = "GOterm"
+
+GO_names <- go$name %>% as.data.frame() %>% rename("GOname" = ".") 
+GO_names <- mutate(GO_names, "GOterm" = row.names(GO_names), .before= "GOname")
+row.names(GO_names) <- NULL
+
+GO_table <- left_join(GO_names, GO_terms, by = "GOterm")
+GO_gene_table <- left_join(GO_terms, GO_names, by = "GOterm")
+
+dNdS_for_visualisation_GO <- left_join(dNdS_for_visualisation, GO_gene_table, by = "gene_name") #15'574 x 9
+dNdS_for_visualisation_GO %>% count(GOname) %>% filter(n>1) %>% arrange(desc(n)) #947
+
+########### 6.) Dividing the whole dataset into 4 quadrants 
+dNdS_for_visualisation_GO <- dNdS_for_visualisation_GO %>% mutate(dNdS_for_visualisation_GO, Quarter = case_when(`dN/dS_germline` > 1 & `dN/dS_cancer` < 1 ~ "Q1",
+                                                                              `dN/dS_germline` > 1 & `dN/dS_cancer` > 1 ~ "Q2",
+                                                                              `dN/dS_germline` < 1 & `dN/dS_cancer` > 1 ~ "Q3",
+                                                                              `dN/dS_germline` < 1 & `dN/dS_cancer` < 1 ~ "Q4"))
+# AND calculating the distance of each point pair from the 1;1
+
+# Create function that calculates distance from (1;1) in the coordinate system based on the pythagoras theorem
+# Feed it the values x and y (x and y coordinates of the point)
+pythag_1 <- function(x,y){
+  # Test that both are numeric - return error if either is not numeric
+  if(is.numeric(x) == FALSE | is.numeric(y) == FALSE){ return('I need numeric values to make this work')}
+  # Test that both are positive - return length of hypoteneuese if true & give an error if either is not positive
+  ifelse(x >= 0 & y >= 0, return(sqrt(((x-1)^2)+((y-1)^2))), return('Values Need to be Positive'))
+  }
+  
+# run the function on data and create new column for output
+dNdS_for_visualisation_GO <- dNdS_for_visualisation_GO %>% mutate(dNdS_for_visualisation_GO, `distance_from_(1;1)` = pythag_1(dNdS_for_visualisation_GO$`dN/dS_cancer`, dNdS_for_visualisation_GO$`dN/dS_germline`))
+
+# List of genes in each quadrant
+Q1 = dNdS_for_visualisation_GO %>% filter(`dN/dS_germline` > 1 & `dN/dS_cancer` < 1) %>% group_by(gene_name) %>% filter(row_number()==1)
+Q2 = dNdS_for_visualisation_GO %>%  filter(`dN/dS_germline` > 1 & `dN/dS_cancer` > 1) %>% group_by(gene_name) %>% filter(row_number()==1)
+Q3 = dNdS_for_visualisation_GO %>%  filter(`dN/dS_germline` < 1 & `dN/dS_cancer` > 1) %>% group_by(gene_name) %>% filter(row_number()==1)
+Q4 = dNdS_for_visualisation_GO %>% filter(`dN/dS_germline` < 1 & `dN/dS_cancer` < 1) %>% group_by(gene_name) %>% filter(row_number()==1)
+
+########## RESULTS = genes and their corresponding GO terms in each quadrants
+# GO term mapping 1: broad terms associated with first couple of genes (of ordered list)
+Q1_ranked <- Q1 %>% arrange(desc(`distance_from_(1;1)`))
+Q2_ranked <- Q2 %>% arrange(desc(`distance_from_(1;1)`))
+Q3_ranked <- Q3 %>% arrange(desc(`distance_from_(1;1)`))
+Q4_ranked <- Q4 %>% arrange(desc(`distance_from_(1;1)`))
+Qall_ranked <- dNdS_for_visualisation_GO %>% arrange(desc(`distance_from_(1;1)`))
+
+write.table(Q3_ranked$gene_name,  file  ="~/Desktop/CAPSTONE/RStudio files/Q3_ranked.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+write.table(Q4_ranked$gene_name,  file  ="~/Desktop/CAPSTONE/RStudio files/Q4_ranked.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+write.table(Qall_ranked$gene_name,  file  ="~/Desktop/CAPSTONE/RStudio files/Qall_ranked.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+# for GOrilla analysis, distance from (1;1) shows how different they are from neutral evolution
+
+# GO term mapping 2: most frequent terms associated with all genes of the group (no order)
+Q1_terms <- Q1 %>% ungroup() %>% count(GOname) %>% drop_na() %>% arrange(desc(n))
+Q2_terms <- Q2 %>% ungroup() %>% count(GOname) %>% drop_na() %>% arrange(desc(n))
+Q3_terms <- Q3 %>% ungroup() %>% count(GOname) %>% drop_na() %>% arrange(desc(n))
+Q4_terms <- Q4 %>% ungroup() %>% count(GOname) %>% drop_na() %>% arrange(desc(n))
+
+#	GO functional enrichment 1: (of ordered list)
+Q1_ranked_go_all <- gost(query = c(Q1_ranked$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+Q1_ranked_go_results_all <- data.frame(GO_term = Q1_ranked_go_all[["result"]][["term_name"]], p_value =Q1_ranked_go_all[["result"]][["p_value"]])
+
+Q2_ranked_go_all <- gost(query = c("CSN2"), organism = "hsapiens", ordered_query = T, significant = T)
+Q2_ranked_go_results_all <- data.frame(GO_term = Q2_ranked_go_all[["result"]][["term_name"]], p_value =Q2_ranked_go_all[["result"]][["p_value"]])
+
+Q3_ranked_go_all <- gost(query = c(Q3_ranked$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+Q3_ranked_go_results_all <- data.frame(GO_term = Q3_ranked_go_all[["result"]][["term_name"]], p_value =Q3_ranked_go_all[["result"]][["p_value"]])
+
+Q4_ranked_go_all <- gost(query = c(Q4_ranked$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+Q4_ranked_go_results_all <- data.frame(GO_term = Q4_ranked_go_all[["result"]][["term_name"]], p_value =Q4_ranked_go_all[["result"]][["p_value"]])
+
+Qall_ranked_go_all <- gost(query = c(Qall_ranked$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+Qall_ranked_go_results_all <- data.frame(GO_term = Qall_ranked_go_all[["result"]][["term_name"]], p_value =Qall_ranked_go_all[["result"]][["p_value"]])
+
+# GO functional enrichment 2: (no order, the whole list of genes within the quadrant)
+Q1_go_all <- gost(query = c(Q1$gene_name), organism = "hsapiens", ordered_query = F, significant = T)
+Q1_go_results_all <- data.frame(GO_term = Q1_go_all[["result"]][["term_name"]], p_value =Q1_go_all[["result"]][["p_value"]])
+
+Q3_go_all <- gost(query = c(Q3$gene_name), organism = "hsapiens", ordered_query = F, significant = T)
+Q3_go_results_all <- data.frame(GO_term = Q3_go_all[["result"]][["term_name"]], p_value =Q3_go_all[["result"]][["p_value"]])
+
+Q4_go_all <- gost(query = c(Q4$gene_name), organism = "hsapiens", ordered_query = F, significant = T)
+Q4_go_results_all <- data.frame(GO_term = Q4_go_all[["result"]][["term_name"]], p_value =Q4_go_all[["result"]][["p_value"]])
+
+################# VISUALISATION of RESULTS
+########### 1.) Main overview PLOT
+ggplot(dNdS_for_visualisation_GO, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`, color = Quarter)) + geom_point(aes()) + xlim(0, 100) + ylim(0, 100) + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red") + stat_cor(label.x.npc = 0.35, label.y.npc = "top") 
+# 1 outlier: CDR1 gene, germline: 98.98078, cancer: 0.8109132
+
+########### 2.)  Zoom in by changing scale (excluding CDR1, same as: dNdS_for_visualisation_GO <- dNdS_for_visualisation_GO %>% filter(!`dN/dS_germline`>90))
+ggplot(dNdS_for_visualisation_GO, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`, color = Quarter)) + geom_point(aes()) + xlim(0, 20) + ylim(0, 20) + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red") + stat_cor(label.x.npc = 0.35, label.y.npc = "top")
+# Removed 3 rows containing missing values (geom_point). 
+# ggplot(dNdS_for_visualisation_GO, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`)) + geom_point(aes()) + xlim(0, 20) + ylim(0, 20) + stat_binhex() + scale_fill_gradient(low = "blue", high = "red") + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red")
+
+########### 3.)  Zooming in even more
+ggplot(dNdS_for_visualisation_GO, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`, color = Quarter)) + geom_point(aes()) + xlim(0, 5) + ylim(0, 5) + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red") + stat_cor(label.x.npc = 0.35, label.y.npc = "top")
+# Removed 16 rows containing missing values (geom_point) >> (dNdS cancer values of around: 33, 24, 19, 19, 13, 13, 11, 10, 7, 7, 6) 
+
+# using alpha argument to visualise extent of overplotting, 0.05 means points are 95%
+ggplot(dNdS_for_visualisation_GO, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`)) + geom_point(aes(), alpha = 0.05) + xlim(0, 5) + ylim(0, 5) + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red") + stat_cor(label.x.npc = 0.35, label.y.npc = "top")
+
+# using stat_binhex() to visualise extent of overplotting / density
+ggplot(dNdS_for_visualisation_GO, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`)) + geom_point(aes()) + xlim(0, 5) + ylim(0, 5) + stat_binhex() + scale_fill_gradient(low = "blue", high = "red") + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red") + stat_cor(label.x.npc = 0.2, label.y.npc = "top")
+#1: Removed 16 rows containing non-finite values (stat_binhex). 
+#2: Removed 16 rows containing missing values (geom_point). 
+#3: Removed 27 rows containing missing values (geom_hex). 
+
+########### 4.)  Taking the log10 of values
+ggplot(dNdS_for_visualisation_GO, aes(x=log10(`dN/dS_cancer`), y=log10(`dN/dS_germline`))) + geom_point(aes(), alpha=0.05) + xlim(-4, 2) + ylim(-4, 2) + geom_hline(yintercept=0, linetype="dashed", color = "red") + geom_vline(xintercept=0, linetype="dashed", color = "red") + stat_cor(label.x.npc = "left", label.y.npc = "top")
+ggplot(dNdS_for_visualisation_GO, aes(x=log10(`dN/dS_cancer`), y=log10(`dN/dS_germline`), color = Quarter)) + geom_point(aes(), alpha=0.05) + xlim(-4, 2) + ylim(-4, 2) + geom_hline(yintercept=0, linetype="dashed", color = "red") + geom_vline(xintercept=0, linetype="dashed", color = "red") + stat_cor(label.x.npc = "left", label.y.npc = "top")
+ggplot(dNdS_for_visualisation_GO, aes(x=log10(`dN/dS_cancer`), y=log10(`dN/dS_germline`))) + geom_point(aes(), alpha=0.05) + xlim(-4, 2) + ylim(-4, 2) + stat_binhex() + scale_fill_gradient(low = "blue", high = "red") + geom_hline(yintercept=0, linetype="dashed", color = "red") + geom_vline(xintercept=0, linetype="dashed", color = "red") + stat_cor(label.x.npc = "left", label.y.npc = "top")
+
+########### 5.)  Taking the -log10 of values: ALPHA and HEXAGON
+ggplot(dNdS_for_visualisation_GO, aes(x=-log10(`dN/dS_cancer`), y=-log10(`dN/dS_germline`))) + geom_point(aes(), alpha=0.05) + xlim(-1.6, 4) + ylim(-1.6, 4) + geom_hline(yintercept=0, linetype="dashed", color = "red") + geom_vline(xintercept=0, linetype="dashed", color = "red")
+ggplot(dNdS_for_visualisation_GO, aes(x=-log10(`dN/dS_cancer`), y=-log10(`dN/dS_germline`))) + geom_point(aes(), alpha=0.05) + xlim(-1.6, 4) + ylim(-1.6, 4) + stat_binhex() + scale_fill_gradient(low = "blue", high = "red") + geom_hline(yintercept=0, linetype="dashed", color = "red") + geom_vline(xintercept=0, linetype="dashed", color = "red")
+
+########### 6.)  Filtering for interesting/relevant ones: ALPHA and HEXAGON
+filtered_dNdS <- dNdS_for_visualisation_GO %>% filter(`dN/dS_cancer`> 1 & `dN/dS_germline`< 1)
+ggplot(filtered_dNdS, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`)) + geom_point(aes(), alpha=0.1) + xlim(0, 5) + ylim(0, 5) + stat_cor(label.x.npc = 0.35, label.y.npc = "top") # alpha=0.1 makes all points 90% transparent
+# Removed 15 rows containing missing values (geom_point).
+ggplot(filtered_dNdS, aes(x=`dN/dS_cancer`, y=`dN/dS_germline`)) + geom_point(aes(), alpha=0.1) + xlim(0, 5) + ylim(0, 5) + stat_binhex() + scale_fill_gradient(low = "blue", high = "red") + stat_cor(label.x.npc = "left", label.y.npc = "top") + geom_hline(yintercept=1, linetype="dashed", color = "red") + geom_vline(xintercept=1, linetype="dashed", color = "red")
+
+# + geom_text(label=rownames(filtered_dNdS$gene_name))
+
+################# Ordered Gene lists for functional GO enrichment
+########### 1.) ORDER: descending dN/dS_cancer values
+dNdS_for_visualisation_o1 <- dNdS_for_visualisation_GO %>% arrange(desc(`dN/dS_cancer`))
+
+# broad GO term mapping 1: broad terms associated with first couple of genes (ranked)
+o1_ranked <- data.frame(gene = dNdS_for_visualisation_o1$gene_name, GOname = dNdS_for_visualisation_o1$GOname, `dN/dS_cancer` = dNdS_for_visualisation_o1$`dN/dS_cancer`)
+TOP_01 <- dNdS_for_visualisation_o1[,c(2, 6, 7, 9)] %>% filter(`dN/dS_cancer`> 5.5)
+
+# GO functional enrichment analysis 1A: only GO terms
+o1_go_GO <- gost(query = c(dNdS_for_visualisation_o1$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO")
+o1_go_results_GO <- data.frame(GO_term = o1_go_GO[["result"]][["term_name"]], p_value =o1_go_GO[["result"]][["p_value"]])
+
+# GO functional enrichment analysis 1B: all sources
+o1_go_all <- gost(query = c(dNdS_for_visualisation_o1$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+o1_go_results_all <- data.frame(GO_term = o1_go_all[["result"]][["term_name"]], p_value =o1_go_all[["result"]][["p_value"]])
+
+gostplot(o1_go_all) # save it as html: gostplot_o1
+
+########### 2.) ORDER: descending dN/dS_germline values
+dNdS_for_visualisation_o2 <- dNdS_for_visualisation_GO %>% arrange(desc(`dN/dS_germline`))
+
+# broad GO term mapping 1: broad terms associated with first couple of genes (ranked)
+o2_ranked <- data.frame(gene = dNdS_for_visualisation_o2$gene_name, GOname = dNdS_for_visualisation_o2$GOname, `dN/dS_germline` = dNdS_for_visualisation_o2$`dN/dS_germline`)
+TOP_02 <- dNdS_for_visualisation_o2[,c(2, 6, 7, 9)] %>% filter(`dN/dS_germline`> 1)
+
+# GO functional enrichment analysis 1A: only GO terms
+o2_go_GO <- gost(query = c(dNdS_for_visualisation_o2$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO")
+o2_go_results_GO <- data.frame(GO_term = o2_go_GO[["result"]][["term_name"]], p_value =o2_go_GO[["result"]][["p_value"]])
+
+# GO functional enrichment analysis 1B: all sources
+o2_go_all <- gost(query = c(dNdS_for_visualisation_o2$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+o2_go_results_all <- data.frame(GO_term = o2_go_all[["result"]][["term_name"]], p_value =o2_go_all[["result"]][["p_value"]])
+
+gostplot(o2_go_all) # save it as html: gostplot_o2
+
+########### 3.) ORDER: absolute value of the difference of (cancer_dN/dS - germline_dN/dS)
+# absolute value: abs()
+dNdS_for_visualisation_o3 <- dNdS_for_visualisation_GO %>% mutate(`dN/dS_difference` = abs(`dN/dS_cancer` - `dN/dS_germline`)) %>% arrange(desc(`dN/dS_difference`))
+# INTRESTINGLY: first few in the ordered list are the same because most high values of dN/dS_cancer are correlated with low values of (close to 0) dN/dS_germline
+
+# broad GO term mapping 1: broad terms associated with first couple of genes (ranked)
+o3_ranked <- data.frame(gene = dNdS_for_visualisation_o3$gene_name, GOname = dNdS_for_visualisation_o3$GOname, `dN/dS_difference` = dNdS_for_visualisation_o3$`dN/dS_difference`)
+TOP_03 <- dNdS_for_visualisation_o3[,c(2, 6, 7, 9, 11)] %>% filter(`dN/dS_difference`> 5)
+
+# GO functional enrichment analysis 1A: only GO terms
+o3_go_GO <- gost(query = c(dNdS_for_visualisation_o3$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO")
+o3_go_results_GO <- data.frame(GO_term = o3_go_GO[["result"]][["term_name"]], p_value =o3_go_GO[["result"]][["p_value"]]) #3284
+
+# GO functional enrichment analysis 1B: all sources
+o3_go_all <- gost(query = c(dNdS_for_visualisation_o3$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+o3_go_results_all <- data.frame(GO_term = o3_go_all[["result"]][["term_name"]], p_value =o3_go_all[["result"]][["p_value"]]) #4569
+
+gostplot(o3_go_all) # save it as html: gostplot_o3
+
+########### 4.) ORDER: Calculated cancer & germline dN/dS ratio (percent error formula)
+dNdS_for_visualisation_o4 <- dNdS_for_visualisation_GO %>% filter(!`dN/dS_germline`== 0) %>% mutate(`dN/dS_difference` = (abs(`dN/dS_cancer` - `dN/dS_germline`)/`dN/dS_germline`)) %>% arrange(desc(`dN/dS_difference`))
+
+# broad GO term mapping 1: broad terms associated with first couple of genes (ranked)
+o4_ranked <- data.frame(gene = dNdS_for_visualisation_o4$gene_name, GOname = dNdS_for_visualisation_o4$GOname, `dN/dS_difference` = dNdS_for_visualisation_o4$`dN/dS_difference`)
+TOP_04 <- dNdS_for_visualisation_o4[,c(2, 6, 7, 9, 11)] %>% filter(`dN/dS_difference`> 50)
+TOP_04$gene_name
+
+# broad GO term mapping 2: most frequent terms associated with all genes of the group, not really relevant!!!
+o4_terms <- dNdS_for_visualisation_o4 %>% drop_na() %>% count(GOname) %>% arrange(desc(n))
+
+# GO functional enrichment analysis 1A: only GO terms
+o4_go_GO <- gost(query = c(dNdS_for_visualisation_o4$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO")
+o4_go_results_GO <- data.frame(GO_term = o4_go_GO[["result"]][["term_name"]], p_value =o4_go_GO[["result"]][["p_value"]]) #3965
+
+  o4_go_GO <- gost(query = c(dNdS_for_visualisation_o4$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO:BP")
+  o4_go_results_GOBP <- data.frame(GO_term = o4_go_GOBP[["result"]][["term_name"]], p_value =o4_go_GOBP[["result"]][["p_value"]]) #2923
+
+  o4_go_GOMF <- gost(query = c(dNdS_for_visualisation_o4$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO:MF")
+  o4_go_results_GOMF <- data.frame(GO_term = o4_go_GOMF[["result"]][["term_name"]], p_value =o4_go_GOMF[["result"]][["p_value"]]) #492
+
+  o4_go_GOCC <- gost(query = c(dNdS_for_visualisation_o4$gene_name), organism = "hsapiens", ordered_query = T, significant = T, sources = "GO:CC")
+  o4_go_results_GOCC <- data.frame(GO_term = o4_go_GOCC[["result"]][["term_name"]], p_value =o4_go_GOCC[["result"]][["p_value"]]) #550
+
+# GO functional enrichment analysis 1B: all sources
+o4_go_all <- gost(query = c(dNdS_for_visualisation_o4$gene_name), organism = "hsapiens", ordered_query = T, significant = T)
+o4_go_results_all <- data.frame(GO_term = o4_go_all[["result"]][["term_name"]], p_value =o4_go_all[["result"]][["p_value"]]) #5712
+
+gostplot(o4_go_all) # save it as html: gostplot_o4
+
+## order 4: most and least different genes for deeper investigation
+most_diff_GO <- gost(query = most_different, organism = "hsapiens", ordered_query = T, significant = T, sources= "GO")
+most_diff_results_GO <- data.frame(GO_term = most_diff_GO[["result"]][["term_name"]], p_value =most_diff_GO[["result"]][["p_value"]]) #223
+
+least_diff_GO <- gost(query = least_different, organism = "hsapiens", ordered_query = T, significant = F, sources= "GO")
+least_diff_results_GO <- data.frame(GO_term = least_diff_GO[["result"]][["term_name"]], p_value =least_diff_GO[["result"]][["p_value"]]) #223
+
+# GOrilla analysis
+write.table(dNdS_for_visualisation_o4$gene_name,  file  ="~/Desktop/CAPSTONE/RStudio files/o4_ranked_genes.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+write.table(TOP_04$gene_name,  file  ="~/Desktop/CAPSTONE/RStudio files/o4_ranked_genes_cutoff_50.txt", col.names= F, row.names= F, quote= F, sep= '\t')
+# http://cbl-gorilla.cs.technion.ac.il
+
+########### STATISTICS: standard deviation of cancer_dN/dS & germline_dN/dS values
+# standard deviation: sd()
+SD_dNdS_cancer <- sd(dNdS_for_visualisation$`dN/dS_cancer`) # 0.579959
+SD_dNdS_germline <- sd(dNdS_for_visualisation$`dN/dS_germline`) # 0.802759
+# a low standard deviation (<1) means data are clustered around the mean: BOTH are, but germline shows higher variability
+
+################# VISUALISATION of the Ordered Gene lists functional enrichment
+o4Man <- dNdS_for_visualisation_o4 %>% group_by(Chromosome) %>% arrange(Chromosome, Start_position)
+
+# Making the Chromosome column numeric; & changing X, Y to 23, 24
+o4Man$Chromosome <- gsub("X", 23, o4Man$Chromosome)
+o4Man$Chromosome <- gsub("Y", 24, o4Man$Chromosome)
+o4Man$Chromosome <- as.numeric(o4Man$Chromosome)
+o4Man_f <- o4Man %>% filter(`dN/dS_difference` > 1000)
+
+col=c("darkcyan", "lightpink3")
+colorvector = c("#B2182B", "#D6604D", "#F4A582", "#FDDBC7", "#D1E5F0", "#92C5DE", "#4393C3", "#2166AC")
+ManhattanPlot <- manhattan(o4Man, chr = "Chromosome", bp = "Start_position", p = "dN/dS_difference", snp = "gene_name", col=colorvector, logp = F, chrlabs=c(1:22, "X", "Y"), annotatePval = 2000, annotateTop = F, genomewideline = F, suggestiveline = F,
+                           ylim = c(0, 4000),
+                           main = "Manhattan Plot of genome-wide cancer & germline dN/dS ratios", xlab = "Chromosomal position", ylab = "Calculated cancer & germline dN/dS difference", cex.axis = 0.8)
+
+qq(o4Man$`dN/dS_difference`, main = "Q-Q plot of genome-wide cancer & germline dN/dS ratios", xlim = c(0, 4), ylim = c(0, 4), col = "#2166AC", las = 1,
+   xlab="Expected cancer & germline dN/dS ratio", ylab="Observed cancer & germline dN/dS ratio") 
+
+# See log10 transformation
+ggplot(o4Man, aes(x=reorder(`Chromosome Name`, `Gene Start (bp)`), y=log10(`dN/dS_difference`))) + geom_point(aes(), alpha=0.05) +
+  ggtitle("Manhattan plot of gene-wise cancer & germline dN/dS ratios") + xlab("Genes according to their chromosomal position (1-22, X, Y)") + ylab("Calculated cancer & germline dN/dS difference")
 
 
 
